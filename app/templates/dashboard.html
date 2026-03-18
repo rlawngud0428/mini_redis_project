@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini Redis Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">MongoDB + Mini Redis</p>
+        <h1>Mini Redis Demo Dashboard</h1>
+        <p class="hero-copy">
+          MongoDB를 원본 저장소로 두고, 직접 구현한 Mini Redis를 캐시 계층과 조회수/랭킹 시스템으로 사용하는 흐름을 한 화면에서 시연합니다.
+        </p>
+      </div>
+      <div class="hero-stats">
+        <div class="stat-card">
+          <span>Mongo Backend</span>
+          <strong>{{ mongo_backend }}</strong>
+        </div>
+        <div class="stat-card">
+          <span>Posts Source</span>
+          <strong>{{ posts_meta.data_source }}</strong>
+        </div>
+        <div class="stat-card">
+          <span>Posts Query</span>
+          <strong>{{ posts_meta.elapsed_ms }} ms</strong>
+        </div>
+      </div>
+    </header>
+
+    {% if request.query_params.get('flash') %}
+    <section class="flash-banner">
+      {% if request.query_params.get('flash') == 'seeded' %}샘플 데이터 생성이 완료되었습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'cache_deleted' %}캐시 삭제가 완료되었습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'snapshot_saved' %}스냅샷 저장이 완료되었습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'snapshot_loaded' %}스냅샷 복구가 완료되었습니다.{% endif %}
+    </section>
+    {% endif %}
+
+    {% if flash %}
+    <section class="flash-banner warning">{{ flash }}</section>
+    {% endif %}
+
+    <main class="grid-layout">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Control Center</h2>
+          <p>데이터 생성, 캐시 무효화, persistence를 한 번에 조작합니다.</p>
+        </div>
+
+        <form class="action-form" method="post" action="/dashboard/seed">
+          <label for="count">Seed Count</label>
+          <div class="inline-form">
+            <input id="count" name="count" type="number" min="1" max="1000" value="5">
+            <button type="submit">Seed Posts</button>
+          </div>
+        </form>
+
+        <form class="action-form" method="post" action="/dashboard/cache/delete">
+          <label for="key">Cache Key</label>
+          <div class="inline-form">
+            <input id="key" name="key" type="text" value="posts:all" placeholder="posts:all or post:1">
+            <button type="submit">Delete Cache</button>
+          </div>
+        </form>
+
+        <div class="button-row">
+          <form method="post" action="/dashboard/save">
+            <button type="submit" class="secondary">Save Snapshot</button>
+          </form>
+          <form method="post" action="/dashboard/load">
+            <button type="submit" class="secondary">Load Snapshot</button>
+          </form>
+          <a class="ghost" href="/docs">API Docs</a>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Posts</h2>
+          <p>목록은 MongoDB 또는 Mini Redis에서 조회되며 출처와 응답 시간이 함께 표시됩니다.</p>
+        </div>
+        <div class="metric-strip">
+          <div>
+            <span>Source</span>
+            <strong>{{ posts_meta.data_source }}</strong>
+          </div>
+          <div>
+            <span>Elapsed</span>
+            <strong>{{ posts_meta.elapsed_ms }} ms</strong>
+          </div>
+          <div>
+            <span>Total</span>
+            <strong>{{ posts|length }}</strong>
+          </div>
+        </div>
+        <div class="post-list">
+          {% for post in posts %}
+          <a class="post-item" href="/dashboard/post/{{ post.post_id }}">
+            <div>
+              <span class="post-id">#{{ post.post_id }}</span>
+              <strong>{{ post.title }}</strong>
+            </div>
+            <span class="pill">View Detail</span>
+          </a>
+          {% else %}
+          <div class="empty-state">게시물이 없습니다. 먼저 Seed Posts를 눌러 데이터를 생성하세요.</div>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Post Detail</h2>
+          <p>상세 조회 시 조회수 INCR와 랭킹 반영이 같이 일어납니다.</p>
+        </div>
+        {% if selected_post %}
+        <article class="detail-card">
+          <span class="post-id">#{{ selected_post.post.post_id }}</span>
+          <h3>{{ selected_post.post.title }}</h3>
+          <p>{{ selected_post.post.content }}</p>
+          <div class="detail-meta">
+            <span>source: {{ selected_post.data_source }}</span>
+            <span>views: {{ selected_post.views }}</span>
+            <span>ranking score: {{ selected_post.ranking_score }}</span>
+            <span>{{ selected_post.elapsed_ms }} ms</span>
+          </div>
+        </article>
+        {% else %}
+        <div class="empty-state">왼쪽 Posts 영역에서 게시물을 클릭하면 상세와 조회수 증가가 표시됩니다.</div>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Rankings</h2>
+          <p>Mini Redis Sorted Set 구조로 인기 게시물 TOP 5를 계산합니다.</p>
+        </div>
+        <div class="ranking-list">
+          {% for item in rankings %}
+          <div class="ranking-item">
+            <div>
+              <span class="post-id">#{{ item.post_id }}</span>
+              <strong>{{ item.title }}</strong>
+            </div>
+            <span class="score">{{ item.score }}</span>
+          </div>
+          {% else %}
+          <div class="empty-state">아직 랭킹 데이터가 없습니다. 게시물 상세 조회를 해보세요.</div>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Performance Compare</h2>
+          <p>`time.perf_counter()` 기반으로 MongoDB 직접 조회와 Mini Redis 캐시 조회를 비교합니다.</p>
+        </div>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <span>MongoDB</span>
+            <strong>{{ performance.mongo.elapsed_ms }} ms</strong>
+            <small>{{ performance.mongo.count }} posts</small>
+          </div>
+          <div class="compare-card accent">
+            <span>Mini Redis</span>
+            <strong>{{ performance.mini_redis.elapsed_ms }} ms</strong>
+            <small>{{ performance.mini_redis.count }} posts</small>
+          </div>
+          <div class="compare-card">
+            <span>Speedup</span>
+            <strong>{{ performance.speedup_ratio }}</strong>
+            <small>mongo / cache</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel full-width">
+        <div class="panel-header">
+          <h2>Mini Redis Debug State</h2>
+          <p>현재 메모리 키, TTL, Sorted Set 상태를 그대로 보여줍니다.</p>
+        </div>
+        <pre class="debug-box">{{ debug | tojson(indent=2) }}</pre>
+      </section>
+    </main>
+  </div>
+  <script>
+  const SCROLL_KEY = "mini-redis-dashboard-scroll-y";
+
+  document.querySelectorAll("form, a.post-item").forEach((element) => {
+    element.addEventListener("submit", () => {
+      sessionStorage.setItem(SCROLL_KEY, String(window.scrollY));
+    });
+    element.addEventListener("click", () => {
+      sessionStorage.setItem(SCROLL_KEY, String(window.scrollY));
+    });
+  });
+
+  window.addEventListener("load", () => {
+    const savedY = sessionStorage.getItem(SCROLL_KEY);
+    if (savedY !== null) {
+      window.scrollTo(0, Number(savedY));
+      sessionStorage.removeItem(SCROLL_KEY);
+    }
+  });
+  </script>
+</body>
+</html>
