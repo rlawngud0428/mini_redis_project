@@ -14,6 +14,7 @@ class PostSchema(BaseModel):
 
 class SeedRequest(BaseModel):
     count: int = Field(default=10, ge=1, le=1000)
+    content_size: int = Field(default=128, ge=32, le=20000)
 
 
 class APIResponse(BaseModel):

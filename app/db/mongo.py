@@ -6,6 +6,7 @@ from typing import Any
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
+from pymongo import ReturnDocument
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 try:
@@ -43,21 +44,23 @@ class MongoRepository:
                 raise
             return mongomock.MongoClient()
 
-    def seed_posts(self, count: int = 10) -> dict[str, Any]:
+    def seed_posts(self, count: int = 10, content_size: int = 128) -> dict[str, Any]:
         self.collection.delete_many({})
         now = datetime.now(timezone.utc)
+        chunk = "Mini Redis keeps reads fast while MongoDB remains the source of truth. "
         docs = [
             {
                 "post_id": index,
                 "title": f"Sample Post {index}",
-                "content": f"Content for sample post {index}",
+                "content": (f"Content for sample post {index}. " + chunk * max(1, content_size // len(chunk)))[:content_size],
+                "view_count": 0,
                 "created_at": now,
             }
             for index in range(1, count + 1)
         ]
         if docs:
             self.collection.insert_many(docs)
-        return {"inserted_count": len(docs)}
+        return {"inserted_count": len(docs), "content_size": content_size}
 
     def list_posts(self) -> list[dict[str, Any]]:
         docs = list(self.collection.find({}, {"_id": 0}).sort("post_id", 1))
@@ -68,6 +71,21 @@ class MongoRepository:
         if not doc:
             return None
         return self._serialize_post(doc)
+
+    def increment_post_views(self, post_id: int, amount: int = 1) -> dict[str, Any] | None:
+        doc = self.collection.find_one_and_update(
+            {"post_id": post_id},
+            {"$inc": {"view_count": amount}},
+            projection={"_id": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not doc:
+            return None
+        return self._serialize_post(doc)
+
+    def top_posts_by_views(self, limit: int = 5) -> list[dict[str, Any]]:
+        docs = list(self.collection.find({}, {"_id": 0}).sort("view_count", -1).limit(limit))
+        return [self._serialize_post(doc) for doc in docs]
 
     def health(self) -> str:
         try:

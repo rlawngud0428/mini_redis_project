@@ -160,13 +160,71 @@ body {
 .button-row,
 .metric-strip,
 .detail-meta,
-.compare-grid {
+.compare-grid,
+.traffic-grid {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
 }
 
+.traffic-grid input {
+  min-width: 140px;
+  width: 100%;
+}
+
+.field-card {
+  flex: 1;
+  min-width: 220px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(85, 56, 24, 0.1);
+}
+
+.field-card label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+
+.field-card p,
+.form-help {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+  font-size: 0.94rem;
+}
+
+.traffic-summary {
+  margin: 14px 0 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(182, 84, 39, 0.08);
+  color: var(--accent-deep);
+}
+
+.traffic-summary strong {
+  font-size: 1.1rem;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 0;
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.checkbox-row input {
+  width: auto;
+  min-width: 0;
+}
+
 input,
+select,
 button,
 .ghost {
   border-radius: 14px;
@@ -176,6 +234,13 @@ button,
 
 input {
   flex: 1;
+  min-width: 180px;
+  padding: 12px 14px;
+  background: white;
+}
+
+select {
+  width: 100%;
   min-width: 180px;
   padding: 12px 14px;
   background: white;
@@ -247,6 +312,19 @@ button.secondary {
   text-decoration: none;
 }
 
+.post-item-hidden {
+  display: none;
+}
+
+.post-item-hidden.post-item-visible {
+  display: flex;
+}
+
+.toggle-posts-button {
+  margin-top: 14px;
+  width: 100%;
+}
+
 .post-id {
   display: inline-block;
   margin-bottom: 6px;
@@ -316,6 +394,16 @@ button.secondary {
   color: rgba(255, 255, 255, 0.82);
 }
 
+.warning-card {
+  background: linear-gradient(145deg, rgba(111, 33, 10, 0.96), rgba(58, 15, 4, 0.98));
+  color: white;
+}
+
+.warning-card span,
+.warning-card small {
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .debug-box {
   margin: 18px 0 0;
   padding: 18px;
@@ -325,6 +413,20 @@ button.secondary {
   overflow-x: auto;
   font-size: 0.92rem;
   line-height: 1.6;
+}
+
+.traffic-compare-grid {
+  margin-top: 18px;
+}
+
+.insight-banner {
+  margin-top: 16px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(124, 50, 16, 0.09);
+  color: var(--accent-deep);
+  line-height: 1.6;
+  border: 1px solid rgba(124, 50, 16, 0.12);
 }
 
 .empty-state {

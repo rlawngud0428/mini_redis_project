@@ -95,7 +95,7 @@ def test_api_endpoints_work() -> None:
         app.dependency_overrides[get_post_service] = lambda: service
         client = TestClient(app)
 
-        seed_response = client.post("/seed", json={"count": 3})
+        seed_response = client.post("/seed", json={"count": 3, "content_size": 256})
         assert seed_response.status_code == 200
         assert seed_response.json()["data"]["inserted_count"] == 3
 
@@ -107,13 +107,30 @@ def test_api_endpoints_work() -> None:
         assert second_posts.status_code == 200
         assert second_posts.json()["meta"]["data_source"] == "mini_redis"
 
+        direct_posts = client.get("/posts", params={"cache_mode": "db_only"})
+        assert direct_posts.status_code == 200
+        assert direct_posts.json()["meta"]["data_source"] == "mongo_direct"
+
         detail_response = client.get("/posts/1")
         assert detail_response.status_code == 200
         assert detail_response.json()["meta"]["views"] == 1
 
+        pure_detail_response = client.get("/posts/1/pure", params={"cache_mode": "db_only"})
+        assert pure_detail_response.status_code == 200
+        assert pure_detail_response.json()["meta"]["pure_read"] is True
+
+        direct_detail_response = client.get("/posts/2", params={"cache_mode": "db_only"})
+        assert direct_detail_response.status_code == 200
+        assert direct_detail_response.json()["meta"]["data_source"] == "mongo_direct"
+        assert direct_detail_response.json()["meta"]["views"] == 1
+
         ranking_response = client.get("/rankings", params={"top_n": 3})
         assert ranking_response.status_code == 200
         assert ranking_response.json()["data"][0]["post_id"] == 1
+
+        mongo_ranking_response = client.get("/rankings", params={"top_n": 3, "source": "mongo"})
+        assert mongo_ranking_response.status_code == 200
+        assert mongo_ranking_response.json()["meta"]["source"] == "mongo"
 
         compare_response = client.get("/compare/performance")
         assert compare_response.status_code == 200
