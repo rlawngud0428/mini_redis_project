@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from app.db.mongo import MongoRepository
+from app.mini_redis.client import RemoteMiniRedisClient
 from app.mini_redis.core import MiniRedis
-from app.mini_redis.persistence import MiniRedisPersistence
 
 
 class PostService:
@@ -18,29 +18,42 @@ class PostService:
     POST_CACHE_KEY_PREFIX = "post:"
     VIEW_KEY_PREFIX = "views:"
     RANKING_KEY = "rankings:posts"
+    HTTP_BURST_RUNNER = Path("scripts/http_burst.js")
 
     def __init__(
         self,
         mongo_repo: MongoRepository,
-        mini_redis: MiniRedis,
-        persistence: MiniRedisPersistence,
+        mini_redis: MiniRedis | RemoteMiniRedisClient,
         cache_ttl_seconds: int = 30,
     ) -> None:
         self.mongo_repo = mongo_repo
         self.mini_redis = mini_redis
-        self.persistence = persistence
         self.cache_ttl_seconds = cache_ttl_seconds
         self.last_traffic_test_result: dict[str, Any] | None = None
         self.last_multi_traffic_test_result: dict[str, Any] | None = None
+
+    @staticmethod
+    def _ranking_item_member(item: Any) -> str:
+        if hasattr(item, "member"):
+            return str(item.member)
+        return str(item["member"])
+
+    @staticmethod
+    def _ranking_item_score(item: Any) -> float:
+        if hasattr(item, "score"):
+            return float(item.score)
+        return float(item["score"])
+
+    def _can_pipeline(self) -> bool:
+        return isinstance(self.mini_redis, RemoteMiniRedisClient)
 
     def seed_posts(self, count: int, content_size: int = 128) -> dict[str, Any]:
         result = self.mongo_repo.seed_posts(count=count, content_size=content_size)
         self.mini_redis.delete(self.POSTS_CACHE_KEY)
         self.mini_redis.delete(self.RANKING_KEY)
-        debug_state = self.mini_redis.debug_state()
-        for key in debug_state["keys"]:
-            if key.startswith(self.POST_CACHE_KEY_PREFIX) or key.startswith(self.VIEW_KEY_PREFIX):
-                self.mini_redis.delete(key)
+        for post_id in self.get_available_post_ids():
+            self.mini_redis.delete(f"{self.POST_CACHE_KEY_PREFIX}{post_id}")
+            self.mini_redis.delete(f"{self.VIEW_KEY_PREFIX}{post_id}")
         return result
 
     def get_posts(self) -> dict[str, Any]:
@@ -61,8 +74,16 @@ class PostService:
                     "elapsed_ms": round(elapsed_ms, 3),
                 }
             posts = self.mongo_repo.list_posts()
-            self.mini_redis.set(self.POSTS_CACHE_KEY, posts)
-            self.mini_redis.expire(self.POSTS_CACHE_KEY, self.cache_ttl_seconds)
+            if self._can_pipeline():
+                self.mini_redis.pipeline(
+                    [
+                        {"command": "set", "key": self.POSTS_CACHE_KEY, "value": posts},
+                        {"command": "expire", "key": self.POSTS_CACHE_KEY, "seconds": self.cache_ttl_seconds},
+                    ]
+                )
+            else:
+                self.mini_redis.set(self.POSTS_CACHE_KEY, posts)
+                self.mini_redis.expire(self.POSTS_CACHE_KEY, self.cache_ttl_seconds)
             data_source = "mongo"
         elapsed_ms = (time.perf_counter() - started) * 1000
         return {
@@ -72,44 +93,74 @@ class PostService:
         }
 
     def get_post_detail(self, post_id: int) -> dict[str, Any]:
-        return self.get_post_detail_by_mode(post_id, cache_mode="cache", pure_read=False)
+        return self.get_post_detail_by_mode(post_id, cache_mode="cache")
 
     def record_view_hit_by_mode(self, post_id: int, cache_mode: str = "cache") -> dict[str, Any]:
         started = time.perf_counter()
-        post = self.mongo_repo.get_post(post_id)
-        if post is None:
-            raise KeyError(f"Post {post_id} not found.")
         if cache_mode == "db_only":
-            mongo_post = self.mongo_repo.increment_post_views(post_id, 1)
+            mongo_post = self.mongo_repo.increment_post_views_slow_path(post_id, 1)
             if mongo_post is None:
                 raise KeyError(f"Post {post_id} not found.")
             views = int(mongo_post.get("view_count", 0))
             ranking_score = float(views)
             data_source = "mongo_direct"
         else:
-            views = self.mini_redis.incr(f"{self.VIEW_KEY_PREFIX}{post_id}")
-            ranking_score = self.mini_redis.zincrby(self.RANKING_KEY, 1, str(post_id))
+            record = self.mini_redis.record_view(
+                view_key=f"{self.VIEW_KEY_PREFIX}{post_id}",
+                ranking_key=self.RANKING_KEY,
+                member=str(post_id),
+                amount=1,
+            )
+            views = int(record["views"])
+            ranking_score = float(record["ranking_score"])
             data_source = "mini_redis"
         elapsed_ms = (time.perf_counter() - started) * 1000
         return {
             "post_id": post_id,
-            "title": post["title"],
             "views": views,
             "ranking_score": ranking_score,
             "data_source": data_source,
             "elapsed_ms": round(elapsed_ms, 3),
         }
 
-    def get_post_detail_by_mode(self, post_id: int, cache_mode: str = "cache", pure_read: bool = False) -> dict[str, Any]:
+    def get_post_detail_by_mode(self, post_id: int, cache_mode: str = "cache") -> dict[str, Any]:
         cache_key = f"{self.POST_CACHE_KEY_PREFIX}{post_id}"
         started = time.perf_counter()
-        mongo_post = None
         if cache_mode == "db_only":
-            post = self.mongo_repo.get_post(post_id)
+            post = self.mongo_repo.increment_post_views_slow_path(post_id, 1)
             if post is None:
                 raise KeyError(f"Post {post_id} not found.")
+            views = int(post.get("view_count", 0))
+            ranking_score = float(views)
             data_source = "mongo_direct"
         else:
+            record: dict[str, Any] | None = None
+            if self._can_pipeline():
+                post, record = self.mini_redis.pipeline(
+                    [
+                        {"command": "get", "key": cache_key},
+                        {
+                            "command": "record_view",
+                            "view_key": f"{self.VIEW_KEY_PREFIX}{post_id}",
+                            "ranking_key": self.RANKING_KEY,
+                            "member": str(post_id),
+                            "amount": 1,
+                        },
+                    ]
+                )
+                if post is not None:
+                    data_source = "mini_redis"
+                    views = int(record["views"])
+                    ranking_score = float(record["ranking_score"])
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    return {
+                        "post": post,
+                        "views": views,
+                        "ranking_score": ranking_score,
+                        "data_source": data_source,
+                        "elapsed_ms": round(elapsed_ms, 3),
+                    }
+
             post = self.mini_redis.get(cache_key)
             if post is not None:
                 data_source = "mini_redis"
@@ -117,25 +168,26 @@ class PostService:
                 post = self.mongo_repo.get_post(post_id)
                 if post is None:
                     raise KeyError(f"Post {post_id} not found.")
-                self.mini_redis.set(cache_key, post)
-                self.mini_redis.expire(cache_key, self.cache_ttl_seconds)
+                if self._can_pipeline():
+                    self.mini_redis.pipeline(
+                        [
+                            {"command": "set", "key": cache_key, "value": post},
+                            {"command": "expire", "key": cache_key, "seconds": self.cache_ttl_seconds},
+                        ]
+                    )
+                else:
+                    self.mini_redis.set(cache_key, post)
+                    self.mini_redis.expire(cache_key, self.cache_ttl_seconds)
                 data_source = "mongo"
-        if pure_read:
-            views = self.mini_redis.get(f"{self.VIEW_KEY_PREFIX}{post_id}") or 0
-            ranking_score = next(
-                (item.score for item in self.mini_redis.zrange(self.RANKING_KEY, 1000, desc=True) if item.member == str(post_id)),
-                0.0,
-            )
-        elif cache_mode == "db_only":
-            mongo_post = self.mongo_repo.increment_post_views(post_id, 1)
-            if mongo_post is None:
-                raise KeyError(f"Post {post_id} not found.")
-            post = mongo_post
-            views = int(mongo_post.get("view_count", 0))
-            ranking_score = float(views)
-        else:
-            views = self.mini_redis.incr(f"{self.VIEW_KEY_PREFIX}{post_id}")
-            ranking_score = self.mini_redis.zincrby(self.RANKING_KEY, 1, str(post_id))
+            if record is None:
+                record = self.mini_redis.record_view(
+                    view_key=f"{self.VIEW_KEY_PREFIX}{post_id}",
+                    ranking_key=self.RANKING_KEY,
+                    member=str(post_id),
+                    amount=1,
+                )
+            views = int(record["views"])
+            ranking_score = float(record["ranking_score"])
         elapsed_ms = (time.perf_counter() - started) * 1000
         return {
             "post": post,
@@ -149,12 +201,12 @@ class PostService:
         rankings = self.mini_redis.zrange(self.RANKING_KEY, top_n, desc=True)
         enriched: list[dict[str, Any]] = []
         for item in rankings:
-            post_id = int(item.member)
+            post_id = int(self._ranking_item_member(item))
             post = self.mini_redis.get(f"{self.POST_CACHE_KEY_PREFIX}{post_id}") or self.mongo_repo.get_post(post_id)
             enriched.append(
                 {
                     "post_id": post_id,
-                    "score": item.score,
+                    "score": self._ranking_item_score(item),
                     "title": post["title"] if post else None,
                 }
             )
@@ -180,40 +232,81 @@ class PostService:
             return post_ids[:limit]
         return post_ids
 
-    def compare_performance(self) -> dict[str, Any]:
-        mongo_start = time.perf_counter()
-        mongo_posts = self.mongo_repo.list_posts()
-        mongo_ms = (time.perf_counter() - mongo_start) * 1000
-
-        self.mini_redis.set(self.POSTS_CACHE_KEY, mongo_posts)
-        self.mini_redis.expire(self.POSTS_CACHE_KEY, self.cache_ttl_seconds)
-
-        cache_start = time.perf_counter()
-        cache_posts = self.mini_redis.get(self.POSTS_CACHE_KEY) or []
-        cache_ms = (time.perf_counter() - cache_start) * 1000
-
-        speedup = None
-        if cache_ms > 0:
-            speedup = round(mongo_ms / cache_ms, 3)
-
-        return {
-            "mongo": {"elapsed_ms": round(mongo_ms, 3), "count": len(mongo_posts)},
-            "mini_redis": {"elapsed_ms": round(cache_ms, 3), "count": len(cache_posts)},
-            "speedup_ratio": speedup,
-        }
-
     def invalidate_cache(self, key: str) -> dict[str, Any]:
         deleted = self.mini_redis.delete(key)
         return {"deleted": deleted, "key": key}
 
-    def save_snapshot(self) -> dict[str, Any]:
-        return self.persistence.save(self.mini_redis)
+    def set_cache_value(self, key: str, value: Any, ttl_seconds: int | None = None) -> dict[str, Any]:
+        stored = self.mini_redis.set(key, value)
+        ttl_applied = False
+        if ttl_seconds is not None:
+            ttl_applied = self.mini_redis.expire(key, ttl_seconds)
+        return {
+            "key": key,
+            "stored": bool(stored),
+            "ttl_applied": bool(ttl_applied),
+            "ttl_seconds": ttl_seconds,
+        }
 
-    def load_snapshot(self) -> dict[str, Any]:
-        return self.persistence.load(self.mini_redis)
+    def get_cache_value(self, key: str) -> dict[str, Any]:
+        value = self.mini_redis.get(key)
+        ttl = self.mini_redis.ttl(key)
+        return {
+            "key": key,
+            "value": value,
+            "ttl_seconds": ttl,
+            "found": value is not None,
+        }
 
-    def debug_mini_redis(self) -> dict[str, Any]:
-        return self.mini_redis.debug_state()
+    def expire_cache_key(self, key: str, ttl_seconds: int) -> dict[str, Any]:
+        updated = self.mini_redis.expire(key, ttl_seconds)
+        ttl = self.mini_redis.ttl(key)
+        return {
+            "key": key,
+            "updated": bool(updated),
+            "ttl_seconds": ttl,
+        }
+
+    def get_cache_ttl(self, key: str) -> dict[str, Any]:
+        ttl = self.mini_redis.ttl(key)
+        return {
+            "key": key,
+            "ttl_seconds": ttl,
+        }
+
+    def get_pending_write_stats(self) -> dict[str, int]:
+        return self.mini_redis.pending_write_stats()
+
+    def flush_pending_views_to_mongo(self) -> dict[str, Any]:
+        raw_deltas = self.mini_redis.flush_pending_views()
+        view_deltas = {
+            int(post_id): int(amount)
+            for post_id, amount in raw_deltas.items()
+            if int(amount) > 0
+        }
+        mongo_result = self.mongo_repo.apply_view_deltas(view_deltas)
+        self.mini_redis.delete(self.POSTS_CACHE_KEY)
+        for post_id in view_deltas:
+            self.mini_redis.delete(f"{self.POST_CACHE_KEY_PREFIX}{post_id}")
+        return {
+            "mode": "write_behind_flush",
+            "applied_posts": mongo_result["applied_posts"],
+            "applied_views": mongo_result["applied_views"],
+            "matched_count": mongo_result["matched_count"],
+            "modified_count": mongo_result["modified_count"],
+        }
+
+    def _finalize_write_behind_run(self, cache_mode: str) -> dict[str, Any] | None:
+        if cache_mode != "cache":
+            return None
+        pending_before = self.get_pending_write_stats()
+        flush_result = self.flush_pending_views_to_mongo()
+        pending_after = self.get_pending_write_stats()
+        return {
+            "pending_before_flush": pending_before,
+            "flush_result": flush_result,
+            "pending_after_flush": pending_after,
+        }
 
     def run_view_traffic_test(
         self,
@@ -222,8 +315,6 @@ class PostService:
         concurrency: int,
         repeat_per_worker: int,
         cache_mode: str = "cache",
-        endpoint_kind: str = "detail",
-        pure_read: bool = False,
     ) -> dict[str, Any]:
         node_path = shutil.which("node")
         if not node_path:
@@ -239,16 +330,8 @@ class PostService:
         scenario_dir.mkdir(parents=True, exist_ok=True)
         scenario_path = scenario_dir / "view_burst.json"
         normalized_base_url = base_url.rstrip("/") + "/"
-        method = "GET"
-        if endpoint_kind == "list":
-            path = f"/posts?cache_mode={cache_mode}"
-        elif endpoint_kind == "view_hit":
-            method = "POST"
-            path = f"/posts/{post_id}/view-hit?cache_mode={cache_mode}"
-        elif pure_read:
-            path = f"/posts/{post_id}/pure?cache_mode={cache_mode}"
-        else:
-            path = f"/posts/{post_id}?cache_mode={cache_mode}"
+        method = "POST"
+        path = f"/posts/{post_id}/view-hit?cache_mode={cache_mode}"
         scenario = {
             "baseUrl": normalized_base_url,
             "concurrency": concurrency,
@@ -256,7 +339,7 @@ class PostService:
             "requestTimeoutMs": 10000,
             "steps": [
                 {
-                    "name": f"view-{endpoint_kind}-{cache_mode}",
+                    "name": f"view-hit-{cache_mode}",
                     "method": method,
                     "path": path,
                     "expectedStatus": [200],
@@ -265,7 +348,7 @@ class PostService:
         }
         scenario_path.write_text(json.dumps(scenario, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        runner_path = Path(r"C:\Users\kjh\.codex\skills\traffic-tester\scripts\http_burst.js")
+        runner_path = self.HTTP_BURST_RUNNER
         command = [node_path, str(runner_path), "--scenario", str(scenario_path)]
         completed = subprocess.run(
             command,
@@ -296,9 +379,10 @@ class PostService:
             "command": command,
             "summary": parsed,
             "cache_mode": cache_mode,
-            "endpoint_kind": endpoint_kind,
-            "pure_read": pure_read,
         }
+        write_behind = self._finalize_write_behind_run(cache_mode)
+        if write_behind is not None:
+            result["write_behind"] = write_behind
         self.last_traffic_test_result = result
         return result
 
@@ -308,8 +392,6 @@ class PostService:
         post_id: int,
         concurrency: int,
         repeat_per_worker: int,
-        endpoint_kind: str = "detail",
-        pure_read: bool = False,
     ) -> dict[str, Any]:
         cached = self.run_view_traffic_test(
             base_url=base_url,
@@ -317,8 +399,6 @@ class PostService:
             concurrency=concurrency,
             repeat_per_worker=repeat_per_worker,
             cache_mode="cache",
-            endpoint_kind=endpoint_kind,
-            pure_read=pure_read,
         )
         direct = self.run_view_traffic_test(
             base_url=base_url,
@@ -326,15 +406,11 @@ class PostService:
             concurrency=concurrency,
             repeat_per_worker=repeat_per_worker,
             cache_mode="db_only",
-            endpoint_kind=endpoint_kind,
-            pure_read=pure_read,
         )
         summary = {
             "success": cached.get("success") and direct.get("success"),
             "cache_run": cached,
             "db_direct_run": direct,
-            "endpoint_kind": endpoint_kind,
-            "pure_read": pure_read,
         }
         if cached.get("success") and direct.get("success"):
             cache_avg = cached["summary"].get("avgLatencyMs")
@@ -361,8 +437,6 @@ class PostService:
         use_db_posts: bool = False,
         db_post_limit: int = 10,
         cache_mode: str = "cache",
-        pure_read: bool = False,
-        endpoint_kind: str = "detail",
     ) -> dict[str, Any]:
         node_path = shutil.which("node")
         if not node_path:
@@ -394,41 +468,15 @@ class PostService:
             step_post_ids = [random.choice(sanitized_post_ids) for _ in range(max(1, random_step_count))]
         else:
             step_post_ids = sanitized_post_ids
-        if endpoint_kind == "list":
-            steps = [
-                {
-                    "name": f"list-posts-{cache_mode}-{index}",
-                    "method": "GET",
-                    "path": f"/posts?cache_mode={cache_mode}",
-                    "expectedStatus": [200],
-                }
-                for index in range(1, max(2, len(step_post_ids) + 1))
-            ]
-        elif endpoint_kind == "view_hit":
-            steps = [
-                {
-                    "name": f"view-hit-{post_id}-{cache_mode}-{index}",
-                    "method": "POST",
-                    "path": f"/posts/{post_id}/view-hit?cache_mode={cache_mode}",
-                    "expectedStatus": [200],
-                }
-                for index, post_id in enumerate(step_post_ids, start=1)
-            ]
-        else:
-            path_builder = (
-                lambda current_post_id: f"/posts/{current_post_id}/pure?cache_mode={cache_mode}"
-                if pure_read
-                else f"/posts/{current_post_id}?cache_mode={cache_mode}"
-            )
-            steps = [
-                {
-                    "name": f"view-post-{post_id}-{cache_mode}-{index}",
-                    "method": "GET",
-                    "path": path_builder(post_id),
-                    "expectedStatus": [200],
-                }
-                for index, post_id in enumerate(step_post_ids, start=1)
-            ]
+        steps = [
+            {
+                "name": f"view-hit-{post_id}-{cache_mode}-{index}",
+                "method": "POST",
+                "path": f"/posts/{post_id}/view-hit?cache_mode={cache_mode}",
+                "expectedStatus": [200],
+            }
+            for index, post_id in enumerate(step_post_ids, start=1)
+        ]
         scenario = {
             "baseUrl": normalized_base_url,
             "concurrency": concurrency,
@@ -439,7 +487,7 @@ class PostService:
         }
         scenario_path.write_text(json.dumps(scenario, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        runner_path = Path(r"C:\Users\kjh\.codex\skills\traffic-tester\scripts\http_burst.js")
+        runner_path = self.HTTP_BURST_RUNNER
         command = [node_path, str(runner_path), "--scenario", str(scenario_path)]
         completed = subprocess.run(
             command,
@@ -476,9 +524,10 @@ class PostService:
             "use_db_posts": use_db_posts,
             "db_post_limit": db_post_limit,
             "cache_mode": cache_mode,
-            "endpoint_kind": endpoint_kind,
-            "pure_read": pure_read,
         }
+        write_behind = self._finalize_write_behind_run(cache_mode)
+        if write_behind is not None:
+            result["write_behind"] = write_behind
         self.last_multi_traffic_test_result = result
         return result
 
@@ -493,8 +542,6 @@ class PostService:
         random_step_count: int = 10,
         use_db_posts: bool = False,
         db_post_limit: int = 10,
-        pure_read: bool = False,
-        endpoint_kind: str = "detail",
     ) -> dict[str, Any]:
         cached = self.run_multi_post_traffic_test(
             base_url=base_url,
@@ -507,8 +554,6 @@ class PostService:
             use_db_posts=use_db_posts,
             db_post_limit=db_post_limit,
             cache_mode="cache",
-            pure_read=pure_read,
-            endpoint_kind=endpoint_kind,
         )
         direct = self.run_multi_post_traffic_test(
             base_url=base_url,
@@ -521,15 +566,11 @@ class PostService:
             use_db_posts=use_db_posts,
             db_post_limit=db_post_limit,
             cache_mode="db_only",
-            pure_read=pure_read,
-            endpoint_kind=endpoint_kind,
         )
         summary = {
             "success": cached.get("success") and direct.get("success"),
             "cache_run": cached,
             "db_direct_run": direct,
-            "endpoint_kind": endpoint_kind,
-            "pure_read": pure_read,
         }
         if cached.get("success") and direct.get("success"):
             cache_avg = cached["summary"].get("avgLatencyMs")

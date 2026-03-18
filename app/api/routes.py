@@ -21,8 +21,7 @@ def get_post_service() -> PostService:
 def build_dashboard_context(service: PostService, selected_post_id: int | None = None, flash: str | None = None) -> dict:
     posts_result = service.get_posts()
     rankings_result = service.get_rankings(5)
-    performance_result = service.compare_performance()
-    debug_result = service.debug_mini_redis()
+    pending_write_stats = service.get_pending_write_stats()
     selected_post = None
     if selected_post_id is not None:
         try:
@@ -37,8 +36,7 @@ def build_dashboard_context(service: PostService, selected_post_id: int | None =
         },
         "selected_post": selected_post,
         "rankings": rankings_result["rankings"],
-        "performance": performance_result,
-        "debug": debug_result,
+        "pending_write_stats": pending_write_stats,
         "traffic_test": service.last_traffic_test_result,
         "multi_traffic_test": service.last_multi_traffic_test_result,
         "flash": flash,
@@ -93,17 +91,10 @@ def dashboard_delete_cache(
     return RedirectResponse(url="/?flash=cache_deleted", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.post("/dashboard/save")
-def dashboard_save(service: PostService = Depends(get_post_service)) -> RedirectResponse:
-    service.save_snapshot()
-    return RedirectResponse(url="/?flash=snapshot_saved", status_code=status.HTTP_303_SEE_OTHER)
-
-
-@router.post("/dashboard/load")
-def dashboard_load(service: PostService = Depends(get_post_service)) -> RedirectResponse:
-    service.load_snapshot()
-    return RedirectResponse(url="/?flash=snapshot_loaded", status_code=status.HTTP_303_SEE_OTHER)
-
+@router.post("/dashboard/flush")
+def dashboard_flush_pending_views(service: PostService = Depends(get_post_service)) -> RedirectResponse:
+    service.flush_pending_views_to_mongo()
+    return RedirectResponse(url="/?flash=flush_done", status_code=status.HTTP_303_SEE_OTHER)
 
 @router.post("/dashboard/traffic-test")
 def dashboard_traffic_test(
@@ -112,8 +103,6 @@ def dashboard_traffic_test(
     concurrency: int = Form(...),
     repeat_per_worker: int = Form(...),
     cache_mode: str = Form(default="compare"),
-    endpoint_kind: str = Form(default="list"),
-    pure_read: str | None = Form(default="on"),
     service: PostService = Depends(get_post_service),
 ) -> RedirectResponse:
     if cache_mode == "compare":
@@ -122,8 +111,6 @@ def dashboard_traffic_test(
             post_id=post_id,
             concurrency=concurrency,
             repeat_per_worker=repeat_per_worker,
-            endpoint_kind=endpoint_kind,
-            pure_read=pure_read == "on",
         )
     else:
         service.run_view_traffic_test(
@@ -132,8 +119,6 @@ def dashboard_traffic_test(
             concurrency=concurrency,
             repeat_per_worker=repeat_per_worker,
             cache_mode=cache_mode,
-            endpoint_kind=endpoint_kind,
-            pure_read=pure_read == "on",
         )
     return RedirectResponse(url="/?flash=traffic_test_done", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -150,8 +135,6 @@ def dashboard_multi_traffic_test(
     use_db_posts: str | None = Form(default=None),
     db_post_limit: int = Form(default=10),
     cache_mode: str = Form(default="compare"),
-    endpoint_kind: str = Form(default="list"),
-    pure_read: str | None = Form(default="on"),
     service: PostService = Depends(get_post_service),
 ) -> RedirectResponse:
     parsed_post_ids = [
@@ -170,8 +153,6 @@ def dashboard_multi_traffic_test(
             random_step_count=random_step_count,
             use_db_posts=use_db_posts == "on",
             db_post_limit=db_post_limit,
-            pure_read=pure_read == "on",
-            endpoint_kind=endpoint_kind,
         )
     else:
         service.run_multi_post_traffic_test(
@@ -185,8 +166,6 @@ def dashboard_multi_traffic_test(
             use_db_posts=use_db_posts == "on",
             db_post_limit=db_post_limit,
             cache_mode=cache_mode,
-            pure_read=pure_read == "on",
-            endpoint_kind=endpoint_kind,
         )
     return RedirectResponse(url="/?flash=multi_traffic_test_done", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -224,7 +203,7 @@ def get_post_detail(
     service: PostService = Depends(get_post_service),
 ) -> APIResponse:
     try:
-        result = service.get_post_detail_by_mode(post_id, cache_mode=cache_mode, pure_read=False)
+        result = service.get_post_detail_by_mode(post_id, cache_mode=cache_mode)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return APIResponse(
@@ -236,30 +215,6 @@ def get_post_detail(
             "data_source": result["data_source"],
             "elapsed_ms": result["elapsed_ms"],
             "cache_mode": cache_mode,
-        },
-    )
-
-
-@router.get("/posts/{post_id}/pure", response_model=APIResponse)
-def get_post_detail_pure(
-    post_id: int,
-    cache_mode: str = Query(default="cache", pattern="^(cache|db_only)$"),
-    service: PostService = Depends(get_post_service),
-) -> APIResponse:
-    try:
-        result = service.get_post_detail_by_mode(post_id, cache_mode=cache_mode, pure_read=True)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    return APIResponse(
-        message="Post fetched successfully without side effects.",
-        data=result["post"],
-        meta={
-            "views": result["views"],
-            "ranking_score": result["ranking_score"],
-            "data_source": result["data_source"],
-            "elapsed_ms": result["elapsed_ms"],
-            "cache_mode": cache_mode,
-            "pure_read": True,
         },
     )
 
@@ -278,7 +233,6 @@ def post_view_hit(
         message="View count updated successfully.",
         data={
             "post_id": result["post_id"],
-            "title": result["title"],
             "views": result["views"],
             "ranking_score": result["ranking_score"],
         },
@@ -286,7 +240,6 @@ def post_view_hit(
             "data_source": result["data_source"],
             "elapsed_ms": result["elapsed_ms"],
             "cache_mode": cache_mode,
-            "endpoint_kind": "view_hit",
         },
     )
 
@@ -304,32 +257,22 @@ def get_rankings(
         meta={"source": source},
     )
 
-
-@router.get("/compare/performance", response_model=APIResponse)
-def compare_performance(service: PostService = Depends(get_post_service)) -> APIResponse:
-    result = service.compare_performance()
-    return APIResponse(message="Performance compared successfully.", data=result)
-
-
 @router.delete("/cache/{key}", response_model=APIResponse)
 def delete_cache(key: str, service: PostService = Depends(get_post_service)) -> APIResponse:
     result = service.invalidate_cache(key)
     return APIResponse(message="Cache invalidation finished.", data=result)
 
 
-@router.post("/mini-redis/save", response_model=APIResponse)
-def save_snapshot(service: PostService = Depends(get_post_service)) -> APIResponse:
-    result = service.save_snapshot()
-    return APIResponse(message="Mini Redis snapshot saved.", data=result)
+@router.post("/mini-redis/flush", response_model=APIResponse)
+def flush_pending_views(service: PostService = Depends(get_post_service)) -> APIResponse:
+    result = service.flush_pending_views_to_mongo()
+    return APIResponse(message="Pending Mini Redis views flushed to MongoDB.", data=result)
 
 
-@router.post("/mini-redis/load", response_model=APIResponse)
-def load_snapshot(service: PostService = Depends(get_post_service)) -> APIResponse:
-    result = service.load_snapshot()
-    return APIResponse(message="Mini Redis snapshot loaded.", data=result)
-
-
-@router.get("/mini-redis/debug", response_model=APIResponse)
-def debug_mini_redis(service: PostService = Depends(get_post_service)) -> APIResponse:
-    result = service.debug_mini_redis()
-    return APIResponse(message="Mini Redis debug state fetched.", data=result)
+@router.get("/mini-redis/health", response_model=APIResponse)
+def mini_redis_health(service: PostService = Depends(get_post_service)) -> APIResponse:
+    if hasattr(service.mini_redis, "ping"):
+        result = service.mini_redis.ping()
+    else:
+        result = {"service": "mini_redis", "status": "ok"}
+    return APIResponse(message="Mini Redis health fetched.", data=result)

@@ -1,0 +1,58 @@
+services:
+  mongo:
+    image: mongo:7
+    command: ["--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  mini-redis:
+    build: .
+    command: python -m app.mini_redis.server
+    ports:
+      - "6380:6380"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MINI_REDIS_HOST: 0.0.0.0
+      MINI_REDIS_PORT: "6380"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import pickle,socket,struct; s=socket.create_connection(('127.0.0.1', 6380), 2); body=pickle.dumps({'command':'ping'}, protocol=pickle.HIGHEST_PROTOCOL); s.sendall(struct.pack('!I', len(body))); s.sendall(body); size=struct.unpack('!I', s.recv(4))[0]; data=s.recv(size); s.close(); response=pickle.loads(data); raise SystemExit(0 if response.get('ok') and response.get('data', {}).get('status') == 'ok' else 1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 2s
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MONGO_URI: mongodb://mongo:27017
+      USE_MOCK_MONGO: "false"
+      MINI_REDIS_URL: tcp://mini-redis:6380
+      MONGO_CONNECT_TIMEOUT_MS: "5000"
+      MONGO_CONNECT_RETRIES: "20"
+      MONGO_CONNECT_RETRY_DELAY: "2"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      mini-redis:
+        condition: service_healthy
+
+volumes:
+  mongo_data:

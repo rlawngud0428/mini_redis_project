@@ -13,7 +13,7 @@
         <p class="eyebrow">MongoDB + Mini Redis</p>
         <h1>Mini Redis Demo Dashboard</h1>
         <p class="hero-copy">
-          MongoDB를 원본 저장소로 두고, 직접 구현한 Mini Redis를 캐시 계층과 조회수/랭킹 시스템으로 사용하는 흐름을 한 화면에서 시연합니다.
+          FastAPI가 MongoDB와 Mini Redis 사이를 조율하면서, Mini Redis는 write-behind로 메모리에 먼저 쓰고 MongoDB는 write-through처럼 직접 쓰는 경로와 비교하는 데모 화면입니다.
         </p>
       </div>
       <div class="hero-stats">
@@ -22,24 +22,23 @@
           <strong>{{ mongo_backend }}</strong>
         </div>
         <div class="stat-card">
-          <span>Posts Source</span>
-          <strong>{{ posts_meta.data_source }}</strong>
+          <span>Pending Posts</span>
+          <strong>{{ pending_write_stats.pending_post_count }}</strong>
         </div>
         <div class="stat-card">
-          <span>Posts Query</span>
-          <strong>{{ posts_meta.elapsed_ms }} ms</strong>
+          <span>Pending Views</span>
+          <strong>{{ pending_write_stats.pending_view_count }}</strong>
         </div>
       </div>
     </header>
 
     {% if request.query_params.get('flash') %}
     <section class="flash-banner">
-      {% if request.query_params.get('flash') == 'seeded' %}샘플 데이터 생성이 완료되었습니다.{% endif %}
-      {% if request.query_params.get('flash') == 'cache_deleted' %}캐시 삭제가 완료되었습니다.{% endif %}
-      {% if request.query_params.get('flash') == 'snapshot_saved' %}스냅샷 저장이 완료되었습니다.{% endif %}
-      {% if request.query_params.get('flash') == 'snapshot_loaded' %}스냅샷 복구가 완료되었습니다.{% endif %}
-      {% if request.query_params.get('flash') == 'traffic_test_done' %}트래픽 테스트 실행이 완료되었습니다.{% endif %}
-      {% if request.query_params.get('flash') == 'multi_traffic_test_done' %}멀티 게시물 트래픽 테스트 실행이 완료되었습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'seeded' %}샘플 게시물을 새로 만들었습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'cache_deleted' %}캐시 키를 삭제했습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'flush_done' %}Mini Redis write-behind 큐를 MongoDB에 반영했습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'traffic_test_done' %}단일 트래픽 테스트를 완료했습니다.{% endif %}
+      {% if request.query_params.get('flash') == 'multi_traffic_test_done' %}멀티 트래픽 테스트를 완료했습니다.{% endif %}
     </section>
     {% endif %}
 
@@ -51,7 +50,7 @@
       <section class="panel">
         <div class="panel-header">
           <h2>Control Center</h2>
-          <p>데이터 생성, 캐시 무효화, persistence를 한 번에 조작합니다.</p>
+          <p>먼저 데이터를 만들고, Mini Redis 경로로 조회수 증가를 쌓은 뒤, 필요할 때만 MongoDB로 flush하는 흐름을 보여주는 화면입니다.</p>
         </div>
 
         <form class="action-form" method="post" action="/dashboard/seed">
@@ -60,16 +59,16 @@
             <div class="field-card">
               <label for="count">Post Count</label>
               <input id="count" name="count" type="number" min="1" max="1000" value="100">
-              <p>게시물 수가 많을수록 목록 조회에서 DB가 더 많은 일을 하게 됩니다.</p>
+              <p>생성할 게시물 개수입니다.</p>
             </div>
             <div class="field-card">
               <label for="content-size">Content Size</label>
               <input id="content-size" name="content_size" type="number" min="32" max="20000" value="4000">
-              <p>본문 길이입니다. 값을 키우면 payload가 커져서 캐시와 DB 차이가 더 잘 드러납니다.</p>
+              <p>게시물 본문 길이입니다. 값이 클수록 한 번에 다루는 데이터가 무거워집니다.</p>
             </div>
           </div>
           <div class="traffic-summary">
-            추천: <strong>100 posts / 4000 chars</strong> 이상으로 시드한 뒤, 아래에서 <strong>Posts List + Pure Read + Compare</strong>를 실행해 보세요.
+            추천 시작값 <strong>100 posts / 4000 chars</strong>
           </div>
           <div class="inline-form">
             <button type="submit">Seed Posts</button>
@@ -84,36 +83,47 @@
           </div>
         </form>
 
+        <form class="action-form" method="post" action="/dashboard/flush">
+          <label>Write-Behind Flush</label>
+          <div class="metric-strip">
+            <div>
+              <span>Pending Posts</span>
+              <strong>{{ pending_write_stats.pending_post_count }}</strong>
+            </div>
+            <div>
+              <span>Pending Views</span>
+              <strong>{{ pending_write_stats.pending_view_count }}</strong>
+            </div>
+          </div>
+          <div class="inline-form">
+            <button type="submit">Flush to MongoDB</button>
+          </div>
+        </form>
+
         <div class="button-row">
-          <form method="post" action="/dashboard/save">
-            <button type="submit" class="secondary">Save Snapshot</button>
-          </form>
-          <form method="post" action="/dashboard/load">
-            <button type="submit" class="secondary">Load Snapshot</button>
-          </form>
           <a class="ghost" href="/docs">API Docs</a>
         </div>
 
         <form class="action-form" method="post" action="/dashboard/traffic-test">
           <label>Traffic Test</label>
           <p class="form-help">
-            로컬 서버의 게시물 목록 또는 상세 조회 엔드포인트에 동시 요청을 보내 캐시 경로와 DB 직접 경로 차이를 확인합니다.
+            한 개의 게시물에 대해 조회수 증가 요청을 동시에 많이 보내는 테스트입니다. 이 화면에서는 항상 <strong>View Hit Only</strong> 시나리오로 실행됩니다.
           </p>
           <div class="traffic-grid">
             <div class="field-card">
               <label for="traffic-post-id">Post ID</label>
-              <input id="traffic-post-id" name="post_id" type="number" min="1" value="1" placeholder="Post ID">
-              <p>어떤 게시물 상세 조회 API를 반복 호출할지 지정합니다. 예: <code>1</code>이면 <code>/posts/1</code>을 테스트합니다.</p>
+              <input id="traffic-post-id" name="post_id" type="number" min="1" value="1">
+              <p>테스트 대상 게시물 번호입니다.</p>
             </div>
             <div class="field-card">
               <label for="traffic-concurrency">Concurrency</label>
-              <input id="traffic-concurrency" name="concurrency" type="number" min="1" max="200" value="20" placeholder="Concurrency">
-              <p>동시에 몇 개의 워커가 요청을 보낼지 의미합니다. 값이 클수록 순간 부하가 커집니다.</p>
+              <input id="traffic-concurrency" name="concurrency" type="number" min="1" max="200" value="20">
+              <p>동시에 요청을 보내는 작업 수입니다.</p>
             </div>
             <div class="field-card">
               <label for="traffic-repeat">Repeat Per Worker</label>
-              <input id="traffic-repeat" name="repeat_per_worker" type="number" min="1" max="200" value="5" placeholder="Repeat">
-              <p>각 워커가 같은 요청을 몇 번 반복할지 의미합니다. 총 요청 수는 <code>Concurrency × Repeat</code> 입니다.</p>
+              <input id="traffic-repeat" name="repeat_per_worker" type="number" min="1" max="200" value="5">
+              <p>각 작업이 반복해서 보낼 횟수입니다.</p>
             </div>
             <div class="field-card">
               <label for="traffic-cache-mode">Target Mode</label>
@@ -122,24 +132,11 @@
                 <option value="cache">Mini Redis Cache Path</option>
                 <option value="db_only">MongoDB Direct Path</option>
               </select>
-              <p>같은 조건으로 캐시 경로와 DB 직접 경로를 비교하거나, 한쪽만 단독 실행할 수 있습니다.</p>
-            </div>
-            <div class="field-card">
-              <label for="traffic-endpoint-kind">Endpoint Kind</label>
-              <select id="traffic-endpoint-kind" name="endpoint_kind">
-                <option value="list" selected>Posts List</option>
-                <option value="detail">Post Detail</option>
-                <option value="view_hit">View Hit Only</option>
-              </select>
-              <p><code>View Hit Only</code>는 조회수 증가만 처리하는 아주 얇은 쓰기 API라서 Mini Redis 메모리 증가와 MongoDB 직접 쓰기 차이가 더 잘 드러납니다.</p>
+              <p>두 경로를 모두 비교하거나, 한쪽 경로만 따로 볼 수 있습니다.</p>
             </div>
           </div>
-          <label class="checkbox-row" for="traffic-pure-read">
-            <input id="traffic-pure-read" name="pure_read" type="checkbox" checked>
-            <span>순수 읽기 모드로 실행하기 (조회수 증가/랭킹 갱신 제외)</span>
-          </label>
           <div class="traffic-summary" data-traffic-summary>
-            예상 총 요청 수: <strong data-total-requests>100</strong>
+            예상 총 요청 수 <strong data-total-requests>100</strong>
           </div>
           <button type="submit">Run Traffic Test</button>
         </form>
@@ -147,38 +144,38 @@
         <form class="action-form" method="post" action="/dashboard/multi-traffic-test">
           <label>Multi User Multi Post Test</label>
           <p class="form-help">
-            여러 명의 사용자가 여러 게시물 상세를 동시에 조회하는 상황을 재현합니다. 각 워커는 지정된 게시물 목록 전체를 순서대로 반복 호출합니다.
+            여러 사용자가 여러 게시물의 조회수를 동시에 올리는 상황을 흉내 내는 테스트입니다. 이 테스트도 항상 <strong>View Hit Only</strong>로 실행됩니다.
           </p>
           <div class="traffic-grid">
             <div class="field-card">
               <label for="multi-post-ids">Post IDs</label>
               <input id="multi-post-ids" name="post_ids" type="text" value="1,2,3" placeholder="1,2,3">
-              <p>수동 모드에서 사용할 조회 대상 게시물 목록입니다. 쉼표로 구분합니다. 예: <code>1,2,3</code></p>
+              <p>수동으로 지정할 게시물 목록입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-db-post-limit">DB Post Limit</label>
-              <input id="multi-db-post-limit" name="db_post_limit" type="number" min="1" max="500" value="10" placeholder="10">
-              <p>DB 모드일 때 MongoDB에서 몇 개의 게시물 ID를 가져와 시나리오에 포함할지 의미합니다.</p>
+              <input id="multi-db-post-limit" name="db_post_limit" type="number" min="1" max="500" value="10">
+              <p>MongoDB에서 자동으로 가져올 게시물 수입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-user-count">User Count</label>
-              <input id="multi-user-count" name="user_count" type="number" min="1" max="200" value="10" placeholder="10">
-              <p>시뮬레이션에서 회전하며 사용할 가상 사용자 수입니다. 사용자별 인증은 없지만 서로 다른 사용자처럼 요청을 분산합니다.</p>
+              <input id="multi-user-count" name="user_count" type="number" min="1" max="200" value="10">
+              <p>가상 사용자 수입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-concurrency">Concurrency</label>
-              <input id="multi-concurrency" name="concurrency" type="number" min="1" max="200" value="15" placeholder="15">
-              <p>동시에 실행할 워커 수입니다. 값이 높을수록 동시에 많은 사용자가 접속한 상황에 가깝습니다.</p>
+              <input id="multi-concurrency" name="concurrency" type="number" min="1" max="200" value="15">
+              <p>동시에 요청을 보내는 작업 수입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-repeat">Repeat Per Worker</label>
-              <input id="multi-repeat" name="repeat_per_worker" type="number" min="1" max="200" value="3" placeholder="3">
-              <p>각 워커가 게시물 목록 전체를 몇 번 반복할지 의미합니다.</p>
+              <input id="multi-repeat" name="repeat_per_worker" type="number" min="1" max="200" value="3">
+              <p>각 작업의 반복 횟수입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-random-step-count">Random Step Count</label>
-              <input id="multi-random-step-count" name="random_step_count" type="number" min="1" max="500" value="10" placeholder="10">
-              <p>랜덤 모드일 때 워커가 한 번 순회할 때 생성할 랜덤 조회 요청 수입니다.</p>
+              <input id="multi-random-step-count" name="random_step_count" type="number" min="1" max="500" value="10">
+              <p>랜덤 모드에서 한 번에 만들 요청 개수입니다.</p>
             </div>
             <div class="field-card">
               <label for="multi-cache-mode">Target Mode</label>
@@ -187,32 +184,19 @@
                 <option value="cache">Mini Redis Cache Path Only</option>
                 <option value="db_only">MongoDB Direct Path Only</option>
               </select>
-              <p>같은 조건으로 캐시 경로와 DB 직접 경로를 비교하거나, 한쪽만 단독 실행할 수 있습니다.</p>
-            </div>
-            <div class="field-card">
-              <label for="multi-endpoint-kind">Endpoint Kind</label>
-              <select id="multi-endpoint-kind" name="endpoint_kind">
-                <option value="list" selected>Posts List</option>
-                <option value="detail">Post Detail</option>
-                <option value="view_hit">View Hit Only</option>
-              </select>
-              <p><code>View Hit Only</code>는 조회수 증가만 비교하므로 쓰기 부하 상황에서 DB와 Mini Redis 차이를 보여주기 좋습니다.</p>
+              <p>두 경로를 모두 비교하거나, 한쪽만 따로 볼 수 있습니다.</p>
             </div>
           </div>
-          <label class="checkbox-row" for="multi-pure-read">
-            <input id="multi-pure-read" name="pure_read" type="checkbox" checked>
-            <span>순수 읽기 모드로 실행하기 (조회수 증가/랭킹 갱신 제외)</span>
-          </label>
           <label class="checkbox-row" for="multi-randomize-posts">
             <input id="multi-randomize-posts" name="randomize_posts" type="checkbox">
-            <span>입력한 게시물 목록 중에서 랜덤하게 게시물을 골라 조회하기</span>
+            <span>입력한 게시물 목록 중에서 랜덤하게 게시물을 골라 요청하기</span>
           </label>
           <label class="checkbox-row" for="multi-use-db-posts">
             <input id="multi-use-db-posts" name="use_db_posts" type="checkbox">
             <span>게시물 목록을 직접 입력하지 않고 MongoDB에서 가져오기</span>
           </label>
           <div class="traffic-summary">
-            예상 총 요청 수: <strong data-multi-total-requests>135</strong>
+            예상 총 요청 수 <strong data-multi-total-requests>135</strong>
           </div>
           <button type="submit">Run Multi Post Traffic Test</button>
         </form>
@@ -221,7 +205,10 @@
       <section class="panel">
         <div class="panel-header">
           <h2>Posts</h2>
-          <p>목록은 MongoDB 또는 Mini Redis에서 조회되며 출처와 응답 시간이 함께 표시됩니다.</p>
+          <p>현재 게시물 목록과 응답 출처를 확인하는 영역입니다.</p>
+        </div>
+        <div class="button-row">
+          <a class="ghost" href="/">Post 새로고침</a>
         </div>
         <div class="metric-strip">
           <div>
@@ -247,17 +234,12 @@
             <span class="pill">View Detail</span>
           </a>
           {% else %}
-          <div class="empty-state">게시물이 없습니다. 먼저 Seed Posts를 눌러 데이터를 생성하세요.</div>
+          <div class="empty-state">게시물이 없습니다. 먼저 Seed Posts로 데이터를 만들어주세요.</div>
           {% endfor %}
         </div>
         {% if posts|length > 15 %}
-        <button
-          type="button"
-          class="toggle-posts-button"
-          data-toggle-posts
-          data-expanded="false"
-        >
-          더보기
+        <button type="button" class="toggle-posts-button" data-toggle-posts data-expanded="false">
+          더 보기
         </button>
         {% endif %}
       </section>
@@ -265,7 +247,7 @@
       <section class="panel">
         <div class="panel-header">
           <h2>Post Detail</h2>
-          <p>상세 조회 시 조회수 INCR와 랭킹 반영이 같이 일어납니다.</p>
+          <p>상세 조회를 누르면 게시물 내용과 현재 조회수 상태를 확인할 수 있습니다.</p>
         </div>
         {% if selected_post %}
         <article class="detail-card">
@@ -280,23 +262,23 @@
           </div>
         </article>
         {% else %}
-        <div class="empty-state">왼쪽 Posts 영역에서 게시물을 클릭하면 상세와 조회수 증가가 표시됩니다.</div>
+        <div class="empty-state">Posts 영역에서 게시물을 누르면 상세 내용을 볼 수 있습니다.</div>
         {% endif %}
       </section>
 
       <section class="panel">
         <div class="panel-header">
           <h2>Rankings</h2>
-          <p>Mini Redis 랭킹과 MongoDB 직접 쓰기 랭킹을 비교해서 볼 수 있습니다.</p>
+          <p>조회수 증가 결과가 Mini Redis 랭킹에 어떻게 반영되는지 보여줍니다.</p>
         </div>
         <div class="metric-strip">
           <div>
             <span>Mini Redis Counter</span>
-            <strong>Memory First</strong>
+            <strong>Write-Behind</strong>
           </div>
           <div>
             <span>MongoDB Counter</span>
-            <strong>Write Direct</strong>
+            <strong>Write-Through</strong>
           </div>
         </div>
         <div class="ranking-list">
@@ -309,39 +291,15 @@
             <span class="score">{{ item.score }}</span>
           </div>
           {% else %}
-          <div class="empty-state">아직 랭킹 데이터가 없습니다. 게시물 상세 조회를 해보세요.</div>
+          <div class="empty-state">아직 랭킹 데이터가 없습니다. 먼저 트래픽 테스트를 실행해보세요.</div>
           {% endfor %}
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Performance Compare</h2>
-          <p>`time.perf_counter()` 기반으로 MongoDB 직접 조회와 Mini Redis 캐시 조회를 비교합니다.</p>
-        </div>
-        <div class="compare-grid">
-          <div class="compare-card">
-            <span>MongoDB</span>
-            <strong>{{ performance.mongo.elapsed_ms }} ms</strong>
-            <small>{{ performance.mongo.count }} posts</small>
-          </div>
-          <div class="compare-card accent">
-            <span>Mini Redis</span>
-            <strong>{{ performance.mini_redis.elapsed_ms }} ms</strong>
-            <small>{{ performance.mini_redis.count }} posts</small>
-          </div>
-          <div class="compare-card">
-            <span>Speedup</span>
-            <strong>{{ performance.speedup_ratio }}</strong>
-            <small>mongo / cache</small>
-          </div>
         </div>
       </section>
 
       <section class="panel full-width">
         <div class="panel-header">
           <h2>Traffic Test Result</h2>
-          <p>`traffic-tester` 스킬의 HTTP burst runner로 로컬 목록 또는 상세 조회 엔드포인트에 동시 요청을 보냅니다.</p>
+          <p>한 게시물에 대한 조회수 증가 테스트 결과입니다. 평균 응답 시간과 p95 지표를 중심으로 보면 됩니다.</p>
         </div>
         {% if traffic_test and traffic_test.comparison %}
         <div class="compare-grid traffic-compare-grid">
@@ -376,22 +334,15 @@
             <small>same load on both paths</small>
           </div>
         </div>
-        <div class="insight-banner">
-          단일 게시물에 대해 같은 트래픽을 캐시 경로와 DB 직접 경로에 각각 적용한 결과입니다.
-          <strong>DB vs Cache</strong> 카드에서 MongoDB 직접 조회가 몇 배 느린지 바로 확인할 수 있습니다.
-        </div>
-        {% endif %}
-        {% if traffic_test %}
-        <pre class="debug-box">{{ traffic_test | tojson(indent=2) }}</pre>
         {% else %}
-        <div class="empty-state">Traffic Test를 실행하면 시나리오 경로, 상태 코드 분포, 평균 및 p95 지연 시간이 표시됩니다.</div>
+        <div class="empty-state">Traffic Test를 실행하면 결과 카드가 여기에 표시됩니다.</div>
         {% endif %}
       </section>
 
       <section class="panel full-width">
         <div class="panel-header">
           <h2>Multi User Multi Post Result</h2>
-          <p>여러 사용자와 여러 게시물을 섞은 시나리오 결과입니다. 캐시 경로와 DB 직접 경로를 같은 조건으로 비교할 수도 있습니다.</p>
+          <p>여러 사용자와 여러 게시물을 섞은 조회수 증가 테스트 결과입니다.</p>
         </div>
         {% if multi_traffic_test and multi_traffic_test.comparison %}
         <div class="compare-grid traffic-compare-grid">
@@ -426,24 +377,9 @@
             <small>same load on both paths</small>
           </div>
         </div>
-        <div class="insight-banner">
-          같은 요청 조건에서 Mini Redis 캐시 경로와 MongoDB 직접 경로를 모두 실행한 결과입니다.
-          발표에서는 <strong>DB vs Cache</strong>, <strong>Avg Gap</strong>, <strong>P95 Gap</strong> 세 카드를 보면 차이를 가장 직관적으로 설명할 수 있습니다.
-        </div>
-        {% endif %}
-        {% if multi_traffic_test %}
-        <pre class="debug-box">{{ multi_traffic_test | tojson(indent=2) }}</pre>
         {% else %}
-        <div class="empty-state">Multi User Multi Post Test를 실행하면 시나리오 경로와 요약 통계가 표시됩니다.</div>
+        <div class="empty-state">Multi User Multi Post Test를 실행하면 결과 카드가 여기에 표시됩니다.</div>
         {% endif %}
-      </section>
-
-      <section class="panel full-width">
-        <div class="panel-header">
-          <h2>Mini Redis Debug State</h2>
-          <p>현재 메모리 키, TTL, Sorted Set 상태를 그대로 보여줍니다.</p>
-        </div>
-        <pre class="debug-box">{{ debug | tojson(indent=2) }}</pre>
       </section>
     </main>
   </div>
@@ -489,10 +425,6 @@
     totalRequestsElement.textContent = String(concurrency * repeat);
   }
 
-  concurrencyInput?.addEventListener("input", updateTrafficSummary);
-  repeatInput?.addEventListener("input", updateTrafficSummary);
-  updateTrafficSummary();
-
   function countPostIds() {
     if (!multiPostIdsInput) {
       return 0;
@@ -519,6 +451,8 @@
     multiTotalRequestsElement.textContent = String(postCount * concurrency * repeat);
   }
 
+  concurrencyInput?.addEventListener("input", updateTrafficSummary);
+  repeatInput?.addEventListener("input", updateTrafficSummary);
   multiPostIdsInput?.addEventListener("input", updateMultiTrafficSummary);
   multiDbPostLimitInput?.addEventListener("input", updateMultiTrafficSummary);
   multiConcurrencyInput?.addEventListener("input", updateMultiTrafficSummary);
@@ -526,6 +460,8 @@
   multiRandomizePostsInput?.addEventListener("change", updateMultiTrafficSummary);
   multiUseDbPostsInput?.addEventListener("change", updateMultiTrafficSummary);
   multiRandomStepCountInput?.addEventListener("input", updateMultiTrafficSummary);
+
+  updateTrafficSummary();
   updateMultiTrafficSummary();
 
   togglePostsButton?.addEventListener("click", () => {
@@ -534,7 +470,7 @@
       item.classList.toggle("post-item-visible", !expanded);
     });
     togglePostsButton.dataset.expanded = expanded ? "false" : "true";
-    togglePostsButton.textContent = expanded ? "더보기" : "접기";
+    togglePostsButton.textContent = expanded ? "더 보기" : "접기";
   });
   </script>
 </body>

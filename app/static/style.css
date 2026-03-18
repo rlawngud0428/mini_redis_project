@@ -404,29 +404,8 @@ button.secondary {
   color: rgba(255, 255, 255, 0.82);
 }
 
-.debug-box {
-  margin: 18px 0 0;
-  padding: 18px;
-  border-radius: 20px;
-  background: #241b14;
-  color: #f7eadf;
-  overflow-x: auto;
-  font-size: 0.92rem;
-  line-height: 1.6;
-}
-
 .traffic-compare-grid {
   margin-top: 18px;
-}
-
-.insight-banner {
-  margin-top: 16px;
-  padding: 16px 18px;
-  border-radius: 18px;
-  background: rgba(124, 50, 16, 0.09);
-  color: var(--accent-deep);
-  line-height: 1.6;
-  border: 1px solid rgba(124, 50, 16, 0.12);
 }
 
 .empty-state {

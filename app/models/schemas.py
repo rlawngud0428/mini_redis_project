@@ -9,6 +9,12 @@ class PostSchema(BaseModel):
     post_id: int
     title: str
     content: str
+    author: str
+    category: str
+    tags: list[str]
+    summary: str
+    reaction_count: int
+    view_count: int | None = None
     created_at: str
 
 
