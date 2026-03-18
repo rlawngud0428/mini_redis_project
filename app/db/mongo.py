@@ -40,9 +40,9 @@ class MongoRepository:
             client.admin.command("ping")
             return client
         except (ServerSelectionTimeoutError, PyMongoError):
-            if mongomock is None:
-                raise
-            return mongomock.MongoClient()
+            raise RuntimeError(
+                "Failed to connect to MongoDB. Start a real MongoDB instance or set USE_MOCK_MONGO=true explicitly."
+            )
 
     def seed_posts(self, count: int = 10, content_size: int = 128) -> dict[str, Any]:
         self.collection.delete_many({})

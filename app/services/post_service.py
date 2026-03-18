@@ -74,6 +74,32 @@ class PostService:
     def get_post_detail(self, post_id: int) -> dict[str, Any]:
         return self.get_post_detail_by_mode(post_id, cache_mode="cache", pure_read=False)
 
+    def record_view_hit_by_mode(self, post_id: int, cache_mode: str = "cache") -> dict[str, Any]:
+        started = time.perf_counter()
+        post = self.mongo_repo.get_post(post_id)
+        if post is None:
+            raise KeyError(f"Post {post_id} not found.")
+        if cache_mode == "db_only":
+            mongo_post = self.mongo_repo.increment_post_views(post_id, 1)
+            if mongo_post is None:
+                raise KeyError(f"Post {post_id} not found.")
+            views = int(mongo_post.get("view_count", 0))
+            ranking_score = float(views)
+            data_source = "mongo_direct"
+        else:
+            views = self.mini_redis.incr(f"{self.VIEW_KEY_PREFIX}{post_id}")
+            ranking_score = self.mini_redis.zincrby(self.RANKING_KEY, 1, str(post_id))
+            data_source = "mini_redis"
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        return {
+            "post_id": post_id,
+            "title": post["title"],
+            "views": views,
+            "ranking_score": ranking_score,
+            "data_source": data_source,
+            "elapsed_ms": round(elapsed_ms, 3),
+        }
+
     def get_post_detail_by_mode(self, post_id: int, cache_mode: str = "cache", pure_read: bool = False) -> dict[str, Any]:
         cache_key = f"{self.POST_CACHE_KEY_PREFIX}{post_id}"
         started = time.perf_counter()
@@ -213,8 +239,12 @@ class PostService:
         scenario_dir.mkdir(parents=True, exist_ok=True)
         scenario_path = scenario_dir / "view_burst.json"
         normalized_base_url = base_url.rstrip("/") + "/"
+        method = "GET"
         if endpoint_kind == "list":
             path = f"/posts?cache_mode={cache_mode}"
+        elif endpoint_kind == "view_hit":
+            method = "POST"
+            path = f"/posts/{post_id}/view-hit?cache_mode={cache_mode}"
         elif pure_read:
             path = f"/posts/{post_id}/pure?cache_mode={cache_mode}"
         else:
@@ -227,7 +257,7 @@ class PostService:
             "steps": [
                 {
                     "name": f"view-{endpoint_kind}-{cache_mode}",
-                    "method": "GET",
+                    "method": method,
                     "path": path,
                     "expectedStatus": [200],
                 }
@@ -373,6 +403,16 @@ class PostService:
                     "expectedStatus": [200],
                 }
                 for index in range(1, max(2, len(step_post_ids) + 1))
+            ]
+        elif endpoint_kind == "view_hit":
+            steps = [
+                {
+                    "name": f"view-hit-{post_id}-{cache_mode}-{index}",
+                    "method": "POST",
+                    "path": f"/posts/{post_id}/view-hit?cache_mode={cache_mode}",
+                    "expectedStatus": [200],
+                }
+                for index, post_id in enumerate(step_post_ids, start=1)
             ]
         else:
             path_builder = (

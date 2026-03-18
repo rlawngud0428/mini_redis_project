@@ -264,6 +264,33 @@ def get_post_detail_pure(
     )
 
 
+@router.post("/posts/{post_id}/view-hit", response_model=APIResponse)
+def post_view_hit(
+    post_id: int,
+    cache_mode: str = Query(default="cache", pattern="^(cache|db_only)$"),
+    service: PostService = Depends(get_post_service),
+) -> APIResponse:
+    try:
+        result = service.record_view_hit_by_mode(post_id, cache_mode=cache_mode)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return APIResponse(
+        message="View count updated successfully.",
+        data={
+            "post_id": result["post_id"],
+            "title": result["title"],
+            "views": result["views"],
+            "ranking_score": result["ranking_score"],
+        },
+        meta={
+            "data_source": result["data_source"],
+            "elapsed_ms": result["elapsed_ms"],
+            "cache_mode": cache_mode,
+            "endpoint_kind": "view_hit",
+        },
+    )
+
+
 @router.get("/rankings", response_model=APIResponse)
 def get_rankings(
     top_n: int = Query(default=5, ge=1, le=100),

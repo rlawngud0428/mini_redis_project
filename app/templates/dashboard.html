@@ -129,8 +129,9 @@
               <select id="traffic-endpoint-kind" name="endpoint_kind">
                 <option value="list" selected>Posts List</option>
                 <option value="detail">Post Detail</option>
+                <option value="view_hit">View Hit Only</option>
               </select>
-              <p>목록 조회가 단건 조회보다 payload가 커서 보통 차이가 더 크게 보입니다.</p>
+              <p><code>View Hit Only</code>는 조회수 증가만 처리하는 아주 얇은 쓰기 API라서 Mini Redis 메모리 증가와 MongoDB 직접 쓰기 차이가 더 잘 드러납니다.</p>
             </div>
           </div>
           <label class="checkbox-row" for="traffic-pure-read">
@@ -193,8 +194,9 @@
               <select id="multi-endpoint-kind" name="endpoint_kind">
                 <option value="list" selected>Posts List</option>
                 <option value="detail">Post Detail</option>
+                <option value="view_hit">View Hit Only</option>
               </select>
-              <p>목록 조회는 DB에 더 많은 데이터를 읽게 하므로 차이가 더 크게 나는 편입니다.</p>
+              <p><code>View Hit Only</code>는 조회수 증가만 비교하므로 쓰기 부하 상황에서 DB와 Mini Redis 차이를 보여주기 좋습니다.</p>
             </div>
           </div>
           <label class="checkbox-row" for="multi-pure-read">

@@ -124,6 +124,14 @@ def test_api_endpoints_work() -> None:
         assert direct_detail_response.json()["meta"]["data_source"] == "mongo_direct"
         assert direct_detail_response.json()["meta"]["views"] == 1
 
+        cache_hit_response = client.post("/posts/1/view-hit", params={"cache_mode": "cache"})
+        assert cache_hit_response.status_code == 200
+        assert cache_hit_response.json()["meta"]["endpoint_kind"] == "view_hit"
+
+        db_hit_response = client.post("/posts/2/view-hit", params={"cache_mode": "db_only"})
+        assert db_hit_response.status_code == 200
+        assert db_hit_response.json()["meta"]["data_source"] == "mongo_direct"
+
         ranking_response = client.get("/rankings", params={"top_n": 3})
         assert ranking_response.status_code == 200
         assert ranking_response.json()["data"][0]["post_id"] == 1
