@@ -136,3 +136,6 @@ python.exe -m app.mini_redis.server
 - **동시성 구조, 락 방식, 만료 처리 방식, 쓰기 전략**까지 함께 고려해야 한다.
 - 결국 캐시는 “빠른 저장소”라기보다,  
     **적절한 전략으로 DB 부하를 줄이고 응답 속도를 개선하는 시스템**이라고 이해하게 되었다.
+
+  <img width="1536" height="1024" alt="file_0000000050f87209aeea1e87e5b423da" src="https://github.com/user-attachments/assets/9b703e7d-3082-4cbc-a96e-8b736ecbfdb7" />
+
